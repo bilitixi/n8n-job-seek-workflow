@@ -4,11 +4,11 @@ The pipeline runs on n8n hosted on **Render's free tier**, with **Supabase** (Po
 
 ```mermaid
 flowchart LR
-    C["cron-job.org"] -- "06:40 GET /healthz (wake)" --> R
-    C -- "06:45 POST /webhook/… + X-Run-Key" --> R
-    R["n8n on Render<br/>(free web service)"] <--> S[("Supabase Postgres<br/>schema n8n: workflows, credentials<br/>schema public: jobs")]
+    W["cron-job.org: wake<br/>06:40 and 18:40<br/>GET /healthz"] --> R
+    X["cron-job.org: run<br/>06:45 and 18:45<br/>POST /webhook/...<br/>X-Run-Key header"] --> R
+    R["n8n on Render<br/>free web service"] <--> S[("Supabase Postgres<br/>schema n8n: n8n data<br/>schema public: jobs")]
     R <--> G["Gmail API"]
-    R <--> O["OpenRouter<br/>(free model)"]
+    R <--> O["OpenRouter<br/>free model"]
 ```
 
 ## 1. Database (Supabase)
