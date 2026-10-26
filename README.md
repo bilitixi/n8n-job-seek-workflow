@@ -14,18 +14,25 @@ SEEK sends a recommendation email every day with a dozen roles, and many of them
 
 ```mermaid
 flowchart LR
-    T(["Webhook trigger<br/>(called by cron-job.org)"]) --> A & B
+    T(["Webhook trigger<br/>called by cron-job.org"])
 
-    subgraph A["1 · Collect: email → database"]
-        direction LR
-        A1["Gmail: fetch unread<br/>SEEK alerts"] --> A2["Parse jobs<br/>(Code)"] --> A3[("Insert new jobs<br/>(skip duplicates)")]
+    subgraph COLLECT["1. Collect: email to database"]
+        A1["Gmail: fetch unread<br/>SEEK alerts"] --> A2["Parse jobs<br/>(Code node)"]
+        A2 --> A3[("Insert new jobs<br/>skip duplicates")]
         A2 --> A4["Mark alerts<br/>as read"]
     end
 
-    subgraph B["2 · Process: database → digest"]
-        direction LR
-        B1["Skip clearly<br/>senior roles (SQL)"] --> B2["Get jobs to score<br/>(new + retryable)"] --> B3["Batch<br/>10 per call"] --> B4["LLM scoring<br/>+ JSON schema"] --> B5["Split answers<br/>by job id"] --> B6[("Save scores")] --> B7["Build + send<br/>HTML digest"]
+    subgraph PROCESS["2. Process: database to digest"]
+        B1["Skip clearly senior<br/>roles (SQL)"] --> B2["Get jobs to score<br/>new + retryable"]
+        B2 --> B3["Batch<br/>10 per call"]
+        B3 --> B4["LLM scoring<br/>JSON schema"]
+        B4 --> B5["Split answers<br/>by job id"]
+        B5 --> B6[("Save scores")]
+        B6 --> B7["Build and send<br/>HTML digest"]
     end
+
+    T --> A1
+    T --> B1
 ```
 
 1. **Collect.** The Gmail node fetches unread SEEK recommendation emails. A Code node parses each email's plain-text body into structured jobs (title, company, location, salary, highlights), and they are inserted into Postgres, skipping duplicates.
@@ -75,6 +82,7 @@ Each job moves through a `status` column: `new` → `filtered_out` / `scored` / 
 ├── tests/                  # unit tests for the Code nodes, with synthetic sample emails
 ├── scripts/extract-node-code.js
 ├── deploy/                 # environment variable templates (no secrets)
+├── docs/credentials.md     # step-by-step credential setup
 └── docs/deployment.md      # full deployment guide
 ```
 
@@ -83,7 +91,7 @@ The files in `code/` are generated: `npm run extract` reads the workflow export 
 ## Running it yourself
 
 1. **Database:** run `database/schema.sql` in a Supabase (or any PostgreSQL) database.
-2. **n8n:** import `workflow/seek-job-alert-pipeline.json` and create four credentials: Postgres, Gmail OAuth2, OpenRouter, and Header Auth for the webhook.
+2. **n8n:** import `workflow/seek-job-alert-pipeline.json` and set up the four credentials (Postgres, Gmail OAuth2, OpenRouter, Header Auth). [docs/credentials.md](docs/credentials.md) walks through each one step by step.
 3. **Personalise:** set your email in **Send digest**, your Gmail label in **Get SEEK alert emails**, and your own profile in the **AI fit scoring** prompt.
 4. **Test:** run `database/seed-test-jobs.sql`, then execute the workflow and check the `jobs` table.
 5. **Deploy and schedule:** see [docs/deployment.md](docs/deployment.md).

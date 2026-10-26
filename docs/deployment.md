@@ -36,12 +36,9 @@ A fresh n8n instance shows "Set up owner account" to whoever opens it first. To 
 
 ## 3. Credentials (created in n8n, never committed)
 
-| Credential | Used by | Notes |
-|---|---|---|
-| Postgres | All Postgres nodes | Supabase session pooler, SSL on, "Ignore SSL issues" on, max connections 3–5 |
-| Gmail OAuth2 | Get SEEK alert emails, Mark alerts as read, Send digest | Google Cloud OAuth client (Web application). Add both redirect URIs: `http://localhost:5678/rest/oauth2-credential/callback` and `https://<your-domain>/rest/oauth2-credential/callback`. In Testing mode the sign-in expires every 7 days |
-| OpenRouter | OpenRouter (free model) | Free models only; `openrouter/free` lets OpenRouter pick an available one |
-| Header Auth (`X-Run-Key`) | Daily run (webhook) | A long random secret; the scheduler sends it as a header |
+The workflow needs four credentials: Postgres (Supabase), Gmail OAuth2, OpenRouter, and Header Auth for the webhook. **[credentials.md](credentials.md) covers each one step by step**, including the Google Cloud setup and troubleshooting.
+
+When n8n runs on a server, add its callback to the Google OAuth client's redirect URIs as well as the local one: `https://<your-domain>/rest/oauth2-credential/callback`.
 
 After importing, also set:
 - **Send digest → To**: your email address.
