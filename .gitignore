@@ -1,0 +1,13 @@
+# Secrets
+.env
+*.env
+!*.env.example
+
+# Dependencies and OS files
+node_modules/
+.DS_Store
+Thumbs.db
+
+# Raw email exports contain personal data: never commit them
+*.zip
+exports/

@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "results": {
+      "type": "array",
+      "description": "One entry per job, in any order",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "The job id exactly as given"
+          },
+          "fit_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "fit_reason": {
+            "type": "string",
+            "description": "One sentence explaining the score"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "fit_score",
+          "fit_reason",
+          "red_flags"
+        ]
+      }
+    }
+  },
+  "required": [
+    "results"
+  ]
+}

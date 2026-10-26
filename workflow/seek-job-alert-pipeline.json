@@ -1,0 +1,684 @@
+{
+  "name": "SEEK Job Alert Pipeline",
+  "nodes": [
+    {
+      "name": "Daily run (webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "seek-run-CHANGE-ME",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "node-01"
+    },
+    {
+      "name": "Get SEEK alert emails",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        208,
+        0
+      ],
+      "parameters": {
+        "operation": "getAll",
+        "returnAll": true,
+        "simple": false,
+        "filters": {
+          "q": "label:Seek is:unread subject:\"new jobs\" newer_than:7d"
+        },
+        "options": {}
+      },
+      "id": "node-02"
+    },
+    {
+      "name": "Parse job listings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Parse SEEK \"Recommendations\" alert emails into one item per job.\n// Works on the plain-text body, which has a stable layout:\n//   Title / Company / Location / [salary] / [perks] / * bullets / [Recently posted] / [tracking URL]\n// SEEK links are tracking redirects with no job number, so the dedupe key is\n// title + company + location, normalised.\n\nconst URL_LINE = /^\\[(https?:\\/\\/[^\\]\\s]+)\\]/;\nconst NOISE = /^(logo|featured|recently posted|strong applicant|early applicant|be an early applicant|expiring soon|new to you|actively hiring|urgently hiring|\\(AUD\\))$/i;\nconst TAGS = /^(immediate start)$/i;   // kept as a note in the description\nconst SALARY = /\\$|\\bper (hour|year|annum|day)\\b|\\bp\\.?a\\.?\\b|\\b\\d+k\\b/i;\nconst LOCATION = /,\\s*\\S|\\((Hybrid|Remote|On[- ]?site)\\)$|^(Auckland|Wellington|Christchurch|Hamilton|Tauranga|Dunedin|Queenstown|Nelson|Napier|Hastings|Palmerston North|New Plymouth|Whangarei|Rotorua|Invercargill|Canterbury|Waikato|Otago|Northland|Bay of Plenty|New Zealand|Remote)\\b/i;\nconst START = /We recommend these jobs/i;\nconst END = /^View more jobs/i;\n\nfunction norm(s) {\n  return String(s || '').toLowerCase().replace(/\\s+/g, ' ').trim();\n}\n\nfunction parseEmail(email) {\n  const text = (email.text || '').replace(/\\r/g, '');\n  let lines = text.split('\\n');\n\n  // Keep only the job list: after the intro paragraph, before \"View more jobs\".\n  const s = lines.findIndex(l => START.test(l));\n  if (s === -1) return [];\n  let i = s;\n  while (i < lines.length && lines[i].trim() !== '') i++;   // skip rest of intro paragraph\n  const e = lines.findIndex((l, idx) => idx > i && END.test(l.trim()));\n  lines = lines.slice(i, e === -1 ? lines.length : e);\n\n  const jobs = [];\n  let block = [];\n  for (const raw of lines) {\n    const m = raw.trim().match(URL_LINE);\n    if (!m) { block.push(raw); continue; }\n\n    // A URL line closes the block of text above it.\n    const job = parseBlock(block, m[1]);\n    if (job) jobs.push(job);\n    block = [];\n  }\n  return jobs;\n}\n\nfunction parseBlock(block, url) {\n  const bullets = [];\n  const plain = [];\n  const tags = [];\n  for (const raw of block) {\n    const t = raw.trim();\n    if (!t || NOISE.test(t)) continue;\n    if (TAGS.test(t)) { tags.push(t); continue; }\n    if (/^\\* /.test(t)) { bullets.push(t.slice(2).trim()); continue; }\n    if (/^ {3,}\\S/.test(raw) && bullets.length) {            // wrapped bullet line\n      bullets[bullets.length - 1] += ' ' + t;\n      continue;\n    }\n    plain.push(t);\n  }\n  if (plain.length < 3) return null;                        // logo links, headers, etc.\n\n  // Title is line 1, location is the first line that looks like a place.\n  // Anything in between is the company (long company names can wrap onto 2 lines).\n  let locIdx = plain.findIndex((l, idx) => idx >= 2 && LOCATION.test(l));\n  if (locIdx === -1) locIdx = 2;\n  const title = plain[0];\n  const company = plain.slice(1, locIdx).join(' ');\n  const location = plain[locIdx];\n  const rest = plain.slice(locIdx + 1);\n  if (title.length > 120 || company.length > 120 || location.length > 80) return null;\n\n  const salary = rest.find(l => SALARY.test(l)) || null;\n  const perks = rest.filter(l => l !== salary);\n  const description = [...tags, ...perks, ...bullets.map(b => '- ' + b)].join('\\n') || null;\n\n  return { title, company, location, salary, description, url };\n}\n\n// ---- Main ----\nconst out = [];\nconst seen = new Set();\nfor (const item of $input.all()) {\n  const email = item.json;\n  const fromName = (email.from && email.from.value && email.from.value[0] && email.from.value[0].name) || '';\n  if (!/Recommendations/i.test(fromName)) continue;        // skip application updates, reminders, etc.\n\n  for (const job of parseEmail(email)) {\n    const key = [norm(job.title), norm(job.company), norm(job.location)].join('|');\n    if (seen.has(key)) continue;\n    seen.add(key);\n    out.push({ json: {\n      source: 'seek_alert',\n      external_id: key,\n      url: job.url,\n      title: job.title,\n      company: job.company,\n      location: job.location,\n      salary: job.salary,\n      work_type: null,\n      description: job.description,\n      listed_at: email.date || null,\n    }});\n  }\n}\nreturn out;\n"
+      },
+      "id": "node-03"
+    },
+    {
+      "name": "Insert new jobs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        656,
+        0
+      ],
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "list",
+          "value": "jobs",
+          "cachedResultName": "jobs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "source": "={{ $json.source }}",
+            "external_id": "={{ $json.external_id }}",
+            "url": "={{ $json.url }}",
+            "title": "={{ $json.title }}",
+            "company": "={{ $json.company }}",
+            "location": "={{ $json.location }}",
+            "salary": "={{ $json.salary }}",
+            "work_type": "={{ $json.work_type }}",
+            "description": "={{ $json.description }}",
+            "listed_at": "={{ $json.listed_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "external_id",
+              "displayName": "external_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "company",
+              "displayName": "company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "salary",
+              "displayName": "salary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "work_type",
+              "displayName": "work_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "description",
+              "displayName": "description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "listed_at",
+              "displayName": "listed_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {
+          "skipOnConflict": true
+        }
+      },
+      "id": "node-04"
+    },
+    {
+      "name": "Collect alert IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        304
+      ],
+      "parameters": {
+        "jsCode": "// One item per alert email, so each can be marked as read.\nreturn $('Get SEEK alert emails').all().map(i => ({ json: { id: i.json.id } }));\n"
+      },
+      "id": "node-05"
+    },
+    {
+      "name": "Mark alerts as read",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        880,
+        304
+      ],
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $json.id }}"
+      },
+      "id": "node-06"
+    },
+    {
+      "name": "Skip senior roles",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        208,
+        560
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Cheap keyword filter before spending AI calls: clearly senior roles are skipped.\nUPDATE jobs\nSET status = 'filtered_out'\nWHERE status = 'new'\n  AND (\n    title ~* '\\m(senior|lead|principal|manager|head of|architect|staff)\\M'\n    OR coalesce(description, '') ~* '\\m([5-9]|1[0-9])\\+?\\s*(years|yrs)'\n  );",
+        "options": {}
+      },
+      "id": "node-07"
+    },
+    {
+      "name": "Get jobs to score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        416,
+        560
+      ],
+      "executeOnce": true,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM jobs\nWHERE status IN ('new', 'error') AND retry_count < 3\nORDER BY created_at;",
+        "options": {}
+      },
+      "id": "node-08"
+    },
+    {
+      "name": "Batch jobs (10 per call)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        560
+      ],
+      "parameters": {
+        "jsCode": "// Group jobs into batches of 10, so each AI call scores 10 jobs at once.\nconst SIZE = 10;\nconst jobs = $input.all().map(i => i.json);\nconst out = [];\n\nfor (let i = 0; i < jobs.length; i += SIZE) {\n  const batch = jobs.slice(i, i + SIZE);\n  const jobsText = batch.map(j => [\n    `[id: ${j.id}]`,\n    `Title: ${j.title}`,\n    `Company: ${j.company || 'Not stated'}`,\n    `Location: ${j.location || 'Not stated'}`,\n    `Salary: ${j.salary || 'Not stated'}`,\n    `Description: ${j.description || 'Not provided'}`,\n  ].join('\\n')).join('\\n\\n');\n\n  out.push({\n    json: {\n      ids: batch.map(j => j.id),\n      retries: Object.fromEntries(batch.map(j => [j.id, j.retry_count || 0])),\n      count: batch.length,\n      jobsText,\n    },\n    pairedItem: batch.map((_, k) => ({ item: i + k })),\n  });\n}\nreturn out;\n"
+      },
+      "id": "node-09"
+    },
+    {
+      "name": "AI fit scoring",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        848,
+        560
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are screening job ads for one candidate. Score how well EACH job below fits them.\n\nCANDIDATE\n- Final-year Bachelor of Computing Systems student (graduating Dec 2026), based in Auckland, New Zealand\n- Currently working as a full-stack software engineering intern\n- Skills: JavaScript, React, HTML/CSS, C#/.NET, Python, Java, SQL (PostgreSQL, MySQL), Azure (incl. Entra ID), Docker, Git, n8n\n- Looking for: graduate programmes, junior roles, and internships\n- Prefers web / full-stack / software development over data analytics\n- Location: Auckland preferred, open to relocating within NZ; prefers on-site roles\n- Sector interests: tech startups, education, finance, consulting\n\nSCORING GUIDE\n- 85-100: Entry-level software/web role, strong skill overlap, suitable location\n- 65-84: Good fit with minor gaps (some unfamiliar tech, less preferred location or sector)\n- 40-64: Partial fit (adjacent field such as data analytics, or notable skill gaps)\n- 0-39: Poor fit (not a software role, or clearly too senior)\n\nHARD RULES\n- Senior, lead, principal, or manager roles, or roles requiring 3+ years of experience: score no higher than 25\n- Non-technical roles: score no higher than 15\n- Roles outside New Zealand: score no higher than 20\n- If details are missing, judge from what is given and do not invent requirements\n- Score each job on its own merits; do not compare jobs against each other\n\nRED FLAGS\nFor each job, list short phrases for anything the candidate should check before applying, for example:\n\"5+ years required\", \"citizenship required\", \"security clearance\", \"outside Auckland\", \"unpaid\".\nUse an empty list if there are none.\n\nOUTPUT\nReturn exactly one result for every job below ({{ $json.count }} jobs), using the job's id exactly as given.\nGive fit_reason as one sentence (max 30 words) explaining the main reason for the score.\n\nJOBS\n{{ $json.jobsText }}",
+        "hasOutputParser": true
+      },
+      "id": "node-10"
+    },
+    {
+      "name": "OpenRouter (free model)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        800,
+        784
+      ],
+      "parameters": {
+        "model": "openrouter/free",
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "node-11"
+    },
+    {
+      "name": "Score format",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.2,
+      "position": [
+        976,
+        784
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"results\": {\n      \"type\": \"array\",\n      \"description\": \"One entry per job, in any order\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"id\": {\n            \"type\": \"integer\",\n            \"description\": \"The job id exactly as given\"\n          },\n          \"fit_score\": {\n            \"type\": \"integer\",\n            \"minimum\": 0,\n            \"maximum\": 100\n          },\n          \"fit_reason\": {\n            \"type\": \"string\",\n            \"description\": \"One sentence explaining the score\"\n          },\n          \"red_flags\": {\n            \"type\": \"array\",\n            \"items\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"required\": [\n          \"id\",\n          \"fit_score\",\n          \"fit_reason\",\n          \"red_flags\"\n        ]\n      }\n    }\n  },\n  \"required\": [\n    \"results\"\n  ]\n}"
+      },
+      "id": "node-12"
+    },
+    {
+      "name": "Split batch scores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        464
+      ],
+      "parameters": {
+        "jsCode": "// Turn the AI answers back into one item per job.\n// Matches answers to jobs by id, so it doesn't need n8n item linking\n// (the Basic LLM Chain doesn't keep it). Every job that was sent in a batch\n// comes out once: 'scored' if the AI answered it, otherwise 'error' with\n// retry_count + 1 (so failed batches and skipped jobs are retried later).\nconst batches = $('Batch jobs (10 per call)').all().map(i => i.json);\n\n// Collect every answer from every AI call (failed calls have no output.results).\nconst answers = new Map();\nfor (const item of $input.all()) {\n  const results = (item.json.output && item.json.output.results) || [];\n  for (const r of results) {\n    const id = Number(r.id);\n    if (!answers.has(id)) answers.set(id, r);\n  }\n}\n\nconst out = [];\nfor (const batch of batches) {\n  for (const id of batch.ids) {\n    const tries = (batch.retries && batch.retries[id]) || 0;\n    const r = answers.get(id);\n    if (r && Number.isFinite(Number(r.fit_score))) {\n      out.push({ json: {\n        id,\n        fit_score: Math.max(0, Math.min(100, Math.round(Number(r.fit_score)))),\n        fit_reason: r.fit_reason || '',\n        red_flags: Array.isArray(r.red_flags) ? r.red_flags : [],\n        status: 'scored',\n        retry_count: tries,\n      }});\n    } else {\n      out.push({ json: {\n        id, fit_score: null, fit_reason: null, red_flags: [],\n        status: 'error',\n        retry_count: tries + 1,\n      }});\n    }\n  }\n}\nreturn out;\n"
+      },
+      "id": "node-13"
+    },
+    {
+      "name": "Save score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1296,
+        464
+      ],
+      "parameters": {
+        "operation": "update",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "list",
+          "value": "jobs",
+          "cachedResultName": "jobs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $json.id }}",
+            "fit_score": "={{ $json.fit_score }}",
+            "fit_reason": "={{ $json.fit_reason }}",
+            "red_flags": "={{ JSON.stringify($json.red_flags || []) }}",
+            "model_used": "openrouter/free",
+            "scored_at": "={{ $now.toISO() }}",
+            "status": "={{ $json.status }}",
+            "retry_count": "={{ $json.retry_count }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fit_score",
+              "displayName": "fit_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fit_reason",
+              "displayName": "fit_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "red_flags",
+              "displayName": "red_flags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "model_used",
+              "displayName": "model_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "scored_at",
+              "displayName": "scored_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-14"
+    },
+    {
+      "name": "Get jobs to notify",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1520,
+        464
+      ],
+      "executeOnce": true,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM jobs\nWHERE status = 'scored' AND fit_score >= 60\nORDER BY fit_score DESC;",
+        "options": {}
+      },
+      "id": "node-15"
+    },
+    {
+      "name": "Build digest email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1728,
+        464
+      ],
+      "parameters": {
+        "jsCode": "// Build one HTML digest email from all matching jobs.\nconst jobs = $input.all().map(i => i.json);\nconst esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\nconst rows = jobs.map(j => {\n  let flags = j.red_flags;\n  if (typeof flags === 'string') { try { flags = JSON.parse(flags); } catch (e) { flags = []; } }\n  if (!Array.isArray(flags)) flags = [];\n  const colour = j.fit_score >= 80 ? '#1a7f37' : '#9a6700';\n  const meta = [j.company, j.location, j.salary].filter(Boolean).map(esc).join(' &middot; ');\n  return `\n    <tr>\n      <td style=\"padding:14px 12px;border-bottom:1px solid #eee;vertical-align:top;width:56px;\">\n        <div style=\"font-size:22px;font-weight:bold;color:${colour};\">${j.fit_score}</div>\n      </td>\n      <td style=\"padding:14px 12px;border-bottom:1px solid #eee;\">\n        <a href=\"${esc(j.url)}\" style=\"font-size:16px;font-weight:bold;color:#0b57d0;text-decoration:none;\">${esc(j.title)}</a>\n        ${meta ? `<div style=\"color:#555;margin-top:2px;\">${meta}</div>` : ''}\n        <div style=\"margin-top:6px;\">${esc(j.fit_reason)}</div>\n        ${flags.length ? `<div style=\"margin-top:6px;color:#b42318;\">&#9888; ${flags.map(esc).join(' &middot; ')}</div>` : ''}\n      </td>\n    </tr>`;\n}).join('');\n\nconst date = $now.setZone('Pacific/Auckland').toFormat('ccc d LLL');\nconst html = `\n<div style=\"font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1f1f1f;\">\n  <h2 style=\"margin:0 0 4px;\">Job matches for ${date}</h2>\n  <p style=\"margin:0 0 16px;color:#555;\">${jobs.length} new role${jobs.length === 1 ? '' : 's'} scored 60+ against your profile.</p>\n  <table style=\"width:100%;border-collapse:collapse;\">${rows}</table>\n  <p style=\"margin-top:20px;font-size:12px;color:#888;\">Sent by your n8n job alert pipeline. Scores are AI-generated: check each ad before applying.</p>\n</div>`;\n\nreturn [{ json: {\n  subject: `${jobs.length} job match${jobs.length === 1 ? '' : 'es'} \\u2013 ${date}`,\n  html,\n  ids: jobs.map(j => j.id),\n}}];\n"
+      },
+      "id": "node-16"
+    },
+    {
+      "name": "Send digest",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1952,
+        464
+      ],
+      "parameters": {
+        "sendTo": "YOUR_EMAIL@example.com",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "node-17"
+    },
+    {
+      "name": "Mark jobs notified",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2176,
+        464
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE jobs\nSET status = 'notified', notified_at = now()\nWHERE id IN ({{ $('Build digest email').item.json.ids.join(',') }});",
+        "options": {}
+      },
+      "id": "node-18"
+    }
+  ],
+  "connections": {
+    "Daily run (webhook)": {
+      "main": [
+        [
+          {
+            "node": "Get SEEK alert emails",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Skip senior roles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get SEEK alert emails": {
+      "main": [
+        [
+          {
+            "node": "Parse job listings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse job listings": {
+      "main": [
+        [
+          {
+            "node": "Insert new jobs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Collect alert IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect alert IDs": {
+      "main": [
+        [
+          {
+            "node": "Mark alerts as read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip senior roles": {
+      "main": [
+        [
+          {
+            "node": "Get jobs to score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get jobs to score": {
+      "main": [
+        [
+          {
+            "node": "Batch jobs (10 per call)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch jobs (10 per call)": {
+      "main": [
+        [
+          {
+            "node": "AI fit scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI fit scoring": {
+      "main": [
+        [
+          {
+            "node": "Split batch scores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter (free model)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI fit scoring",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score format": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI fit scoring",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split batch scores": {
+      "main": [
+        [
+          {
+            "node": "Save score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save score": {
+      "main": [
+        [
+          {
+            "node": "Get jobs to notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get jobs to notify": {
+      "main": [
+        [
+          {
+            "node": "Build digest email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build digest email": {
+      "main": [
+        [
+          {
+            "node": "Send digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send digest": {
+      "main": [
+        [
+          {
+            "node": "Mark jobs notified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Pacific/Auckland"
+  },
+  "pinData": {}
+}
