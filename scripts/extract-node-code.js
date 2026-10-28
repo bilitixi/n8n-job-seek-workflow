@@ -20,7 +20,12 @@ const header = (node, comment) =>
   `${comment} Do not edit here: change the node in n8n, export the workflow, and re-run\n` +
   `${comment} node scripts/extract-node-code.js\n\n`;
 
+// Retry-pass copies of the AI nodes (e.g. "AI fit scoring (retry)") slug to the same file as the
+// original; the first node wins so the readable copy always comes from the main scoring pass.
+const written = new Set();
 const write = (rel, content) => {
+  if (written.has(rel)) { console.log('skipped', rel, '(already written by an earlier node)'); return; }
+  written.add(rel);
   const file = path.join(root, rel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content);
