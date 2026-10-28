@@ -79,3 +79,20 @@ test('builds one digest email with escaped content and the job ids', () => {
   assert.match(mail.html, /A &amp; B/);
   assert.match(mail.html, /citizenship required/);
 });
+
+// ---------- Same-run retry pass ----------
+
+test('retry batching matches the main batching', () => {
+  const input = Array.from({ length: 12 }, (_, k) => job(k + 1, 1));
+  assert.deepEqual(runNode('batch-retry-jobs.js', { input }), runNode('batch-jobs.js', { input }));
+});
+
+test('retry split reads the "Batch retry jobs" node, not the first-pass batches', () => {
+  const retryBatches = [{ json: { ids: [3, 4], retries: { 3: 1, 4: 2 }, count: 2 } }];
+  const out = runNode('split-retry-scores.js', {
+    input: [{ json: { output: { results: [{ id: 3, fit_score: 72, fit_reason: 'ok', red_flags: [] }] } } }],
+    nodes: { 'Batch retry jobs': retryBatches },
+  }).map(o => o.json);
+
+  assert.deepEqual(out.map(j => [j.id, j.status, j.retry_count]), [[3, 'scored', 1], [4, 'error', 3]]);
+});
