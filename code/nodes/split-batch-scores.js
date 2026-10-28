@@ -7,6 +7,7 @@
 // (the Basic LLM Chain doesn't keep it). Every job that was sent in a batch
 // comes out once: 'scored' if the AI answered it, otherwise 'error' with
 // retry_count + 1 (so failed batches and skipped jobs are retried later).
+// In the retry loop this node runs again; $('Batch jobs (10 per call)') returns that node's latest run.
 const batches = $('Batch jobs (10 per call)').all().map(i => i.json);
 
 // Collect every answer from every AI call (failed calls have no output.results).

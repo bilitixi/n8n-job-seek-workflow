@@ -23,23 +23,22 @@ flowchart LR
     end
 
     subgraph PROCESS["2. Process: database to digest"]
-        B1["Skip clearly senior<br/>roles (SQL)"] --> B2["Get jobs to score<br/>new + retryable"]
+        B0["Reset retries for<br/>recent failed jobs"] --> B1["Skip clearly senior<br/>roles (SQL)"] --> B2["Get jobs to score<br/>new + retryable"]
         B2 --> B3["Batch<br/>10 per call"]
         B3 --> B4["LLM scoring<br/>JSON schema"]
         B4 --> B5["Split answers<br/>by job id"]
         B5 --> B6[("Save scores")]
         B6 --> B8{"Any jobs<br/>still in error?"}
-        B8 -- "yes: wait 60s,<br/>score once more" --> B9[("Save retry<br/>scores")]
+        B8 -- "yes: wait 60s,<br/>score them again" --> B3
         B8 -- no --> B7["Build and send<br/>HTML digest"]
-        B9 --> B7
     end
 
     T --> A1
-    T --> B1
+    T --> B0
 ```
 
 1. **Collect.** The Gmail node fetches unread SEEK recommendation emails. A Code node parses each email's plain-text body into structured jobs (title, company, location, salary, highlights), and they are inserted into Postgres, skipping duplicates.
-2. **Process.** A SQL filter drops clearly senior roles before any AI call. Remaining jobs are sent to an LLM **10 at a time**, and the reply must match a JSON schema (`fit_score`, `fit_reason`, `red_flags`). Scores are saved. Any job the AI couldn't score (a rate limit or an invalid reply) gets one more attempt in the same run after a 60-second pause. Every job scoring **60+** then goes into one HTML digest email, sorted by score.
+2. **Process.** Failed jobs from the last 7 days that used up their retries get a fresh set of attempts. A SQL filter then drops clearly senior roles before any AI call. Remaining jobs are sent to an LLM **10 at a time**, and the reply must match a JSON schema (`fit_score`, `fit_reason`, `red_flags`). Scores are saved. Any job the AI couldn't score (a rate limit or an invalid reply) loops back through the scoring step after a 60-second pause, until it is scored or reaches the retry cap. Every job scoring **60+** then goes into one HTML digest email, sorted by score.
 
 Each job moves through a `status` column: `new` → `filtered_out` / `scored` / `error` → `notified`, so every job is scored once and emailed once.
 
@@ -54,8 +53,8 @@ Each job moves through a `status` column: `new` → `filtered_out` / `scored` / 
 | **Batch 10 jobs per LLM call** | Keeps a typical day to 1–3 requests, well within free-tier limits. |
 | **Structured output** validated against a JSON schema | Invalid replies are caught instead of being written to the database. |
 | **Match AI answers to jobs by id**, not by n8n item linking | n8n's LLM chain node doesn't preserve item links, so answers are matched by the job id included in each batch. |
-| **Retries with a cap** (`retry_count < 3`) | Temporary provider errors (rate limits, 502s) are retried on later runs; a job that keeps failing stops using quota after 3 attempts. |
-| **Same-run retry pass** after saving scores | Jobs that failed are re-scored once after a 60-second wait, so a brief rate limit doesn't keep them out of today's digest. The retry copies of the batch and split nodes are kept separate (rather than looping back) so the run can't cycle. |
+| **Retries with a cap** (`retry_count < 3`) | Temporary provider errors (rate limits, 502s) are retried on later runs; a job that keeps failing stops using quota after 3 attempts. Each run resets the count for failed jobs from the last 7 days, so a recent job gets 3 new attempts per run while older ones stay retired. |
+| **Retry loop** after saving scores | Jobs that failed loop back into the same batch → AI → split → save chain after a 60-second wait, so a brief rate limit doesn't keep them out of today's digest. The loop is bounded twice: by `retry_count < 3` in the query and by a 3-pass limit on the IF node. It relies on `$('Batch jobs (10 per call)')` returning that node's latest run, which was checked with a test execution. |
 | **Cheap filter before the LLM** | A regex in SQL removes obviously senior roles at no API cost. |
 | **Row Level Security** on the Supabase tables | Supabase exposes `public` tables through its API; RLS with no policies blocks that, while n8n connects as the database owner. |
 
@@ -69,7 +68,7 @@ Each job moves through a `status` column: `new` → `filtered_out` / `scored` / 
 | Email | Gmail API (OAuth 2.0) |
 | Code | JavaScript (n8n Code nodes), SQL |
 | Hosting | Render (free web service), custom domain via Cloudflare DNS |
-| Scheduling | cron-job.org calling a header-authenticated webhook |
+| Scheduling | cron-job.org calling a header-authenticated webhook; a **Run manually** trigger for test runs from the editor |
 | Testing | Node.js built-in test runner |
 
 ## Repository layout
