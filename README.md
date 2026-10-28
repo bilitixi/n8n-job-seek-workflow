@@ -29,9 +29,8 @@ flowchart LR
         B4 --> B5["Split answers<br/>by job id"]
         B5 --> B6[("Save scores")]
         B6 --> B8{"Any jobs<br/>still in error?"}
-        B8 -- "yes: wait 60s,<br/>score once more" --> B9[("Save retry<br/>scores")]
+        B8 -- "yes: wait 60s,<br/>score them again" --> B3
         B8 -- no --> B7["Build and send<br/>HTML digest"]
-        B9 --> B7
     end
 
     T --> A1
@@ -39,7 +38,7 @@ flowchart LR
 ```
 
 1. **Collect.** The Gmail node fetches unread SEEK recommendation emails. A Code node parses each email's plain-text body into structured jobs (title, company, location, salary, highlights), and they are inserted into Postgres, skipping duplicates.
-2. **Process.** A SQL filter drops clearly senior roles before any AI call. Remaining jobs are sent to an LLM **10 at a time**, and the reply must match a JSON schema (`fit_score`, `fit_reason`, `red_flags`). Scores are saved. Any job the AI couldn't score (a rate limit or an invalid reply) gets one more attempt in the same run after a 60-second pause. Every job scoring **60+** then goes into one HTML digest email, sorted by score.
+2. **Process.** A SQL filter drops clearly senior roles before any AI call. Remaining jobs are sent to an LLM **10 at a time**, and the reply must match a JSON schema (`fit_score`, `fit_reason`, `red_flags`). Scores are saved. Any job the AI couldn't score (a rate limit or an invalid reply) loops back through the scoring step after a 60-second pause, until it is scored or reaches the retry cap. Every job scoring **60+** then goes into one HTML digest email, sorted by score.
 
 Each job moves through a `status` column: `new` → `filtered_out` / `scored` / `error` → `notified`, so every job is scored once and emailed once.
 
@@ -55,7 +54,7 @@ Each job moves through a `status` column: `new` → `filtered_out` / `scored` / 
 | **Structured output** validated against a JSON schema | Invalid replies are caught instead of being written to the database. |
 | **Match AI answers to jobs by id**, not by n8n item linking | n8n's LLM chain node doesn't preserve item links, so answers are matched by the job id included in each batch. |
 | **Retries with a cap** (`retry_count < 3`) | Temporary provider errors (rate limits, 502s) are retried on later runs; a job that keeps failing stops using quota after 3 attempts. |
-| **Same-run retry pass** after saving scores | Jobs that failed are re-scored once after a 60-second wait, so a brief rate limit doesn't keep them out of today's digest. The retry copies of the batch and split nodes are kept separate (rather than looping back) so the run can't cycle. |
+| **Retry loop** after saving scores | Jobs that failed loop back into the same batch → AI → split → save chain after a 60-second wait, so a brief rate limit doesn't keep them out of today's digest. The loop is bounded twice: by `retry_count < 3` in the query and by a 3-pass limit on the IF node. It relies on `$('Batch jobs (10 per call)')` returning that node's latest run, which was checked with a test execution. |
 | **Cheap filter before the LLM** | A regex in SQL removes obviously senior roles at no API cost. |
 | **Row Level Security** on the Supabase tables | Supabase exposes `public` tables through its API; RLS with no policies blocks that, while n8n connects as the database owner. |
 

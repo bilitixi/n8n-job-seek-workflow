@@ -2,8 +2,8 @@
 -- Do not edit here: change the node in n8n, export the workflow, and re-run
 -- node scripts/extract-node-code.js
 
--- Same-run retry: jobs the first scoring pass couldn't score (rate limits, bad replies).
--- Still capped by retry_count, so a job that keeps failing stops using quota.
+-- Retry loop: jobs this run couldn't score yet (rate limits, bad replies) go back through
+-- the scoring chain after a 60s wait, until they're scored or reach the retry_count cap.
 SELECT * FROM jobs
 WHERE status = 'error' AND retry_count < 3
 ORDER BY created_at;

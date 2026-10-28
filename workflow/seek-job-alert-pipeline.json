@@ -316,7 +316,7 @@
         464
       ],
       "parameters": {
-        "jsCode": "// Turn the AI answers back into one item per job.\n// Matches answers to jobs by id, so it doesn't need n8n item linking\n// (the Basic LLM Chain doesn't keep it). Every job that was sent in a batch\n// comes out once: 'scored' if the AI answered it, otherwise 'error' with\n// retry_count + 1 (so failed batches and skipped jobs are retried later).\nconst batches = $('Batch jobs (10 per call)').all().map(i => i.json);\n\n// Collect every answer from every AI call (failed calls have no output.results).\nconst answers = new Map();\nfor (const item of $input.all()) {\n  const results = (item.json.output && item.json.output.results) || [];\n  for (const r of results) {\n    const id = Number(r.id);\n    if (!answers.has(id)) answers.set(id, r);\n  }\n}\n\nconst out = [];\nfor (const batch of batches) {\n  for (const id of batch.ids) {\n    const tries = (batch.retries && batch.retries[id]) || 0;\n    const r = answers.get(id);\n    if (r && Number.isFinite(Number(r.fit_score))) {\n      out.push({ json: {\n        id,\n        fit_score: Math.max(0, Math.min(100, Math.round(Number(r.fit_score)))),\n        fit_reason: r.fit_reason || '',\n        red_flags: Array.isArray(r.red_flags) ? r.red_flags : [],\n        status: 'scored',\n        retry_count: tries,\n      }});\n    } else {\n      out.push({ json: {\n        id, fit_score: null, fit_reason: null, red_flags: [],\n        status: 'error',\n        retry_count: tries + 1,\n      }});\n    }\n  }\n}\nreturn out;\n"
+        "jsCode": "// Turn the AI answers back into one item per job.\n// Matches answers to jobs by id, so it doesn't need n8n item linking\n// (the Basic LLM Chain doesn't keep it). Every job that was sent in a batch\n// comes out once: 'scored' if the AI answered it, otherwise 'error' with\n// retry_count + 1 (so failed batches and skipped jobs are retried later).\n// In the retry loop this node runs again; $('Batch jobs (10 per call)') returns that node's latest run.\nconst batches = $('Batch jobs (10 per call)').all().map(i => i.json);\n\n// Collect every answer from every AI call (failed calls have no output.results).\nconst answers = new Map();\nfor (const item of $input.all()) {\n  const results = (item.json.output && item.json.output.results) || [];\n  for (const r of results) {\n    const id = Number(r.id);\n    if (!answers.has(id)) answers.set(id, r);\n  }\n}\n\nconst out = [];\nfor (const batch of batches) {\n  for (const id of batch.ids) {\n    const tries = (batch.retries && batch.retries[id]) || 0;\n    const r = answers.get(id);\n    if (r && Number.isFinite(Number(r.fit_score))) {\n      out.push({ json: {\n        id,\n        fit_score: Math.max(0, Math.min(100, Math.round(Number(r.fit_score)))),\n        fit_reason: r.fit_reason || '',\n        red_flags: Array.isArray(r.red_flags) ? r.red_flags : [],\n        status: 'scored',\n        retry_count: tries,\n      }});\n    } else {\n      out.push({ json: {\n        id, fit_score: null, fit_reason: null, red_flags: [],\n        status: 'error',\n        retry_count: tries + 1,\n      }});\n    }\n  }\n}\nreturn out;\n"
       },
       "id": "node-13"
     },
@@ -511,7 +511,7 @@
       "alwaysOutputData": true,
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Same-run retry: jobs the first scoring pass couldn't score (rate limits, bad replies).\n-- Still capped by retry_count, so a job that keeps failing stops using quota.\nSELECT * FROM jobs\nWHERE status = 'error' AND retry_count < 3\nORDER BY created_at;",
+        "query": "-- Retry loop: jobs this run couldn't score yet (rate limits, bad replies) go back through\n-- the scoring chain after a 60s wait, until they're scored or reach the retry_count cap.\nSELECT * FROM jobs\nWHERE status = 'error' AND retry_count < 3\nORDER BY created_at;",
         "options": {}
       }
     },
@@ -542,6 +542,15 @@
                 "operation": "exists",
                 "singleValue": true
               }
+            },
+            {
+              "id": "a833a599-030f-4a98-9a55-682f81ac1daf",
+              "leftValue": "={{ $runIndex }}",
+              "rightValue": 3,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
             }
           ],
           "combinator": "and"
@@ -557,202 +566,11 @@
       "typeVersion": 1.1,
       "position": [
         1744,
-        912
+        880
       ],
       "parameters": {
         "amount": 60
       }
-    },
-    {
-      "name": "Batch retry jobs",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1968,
-        912
-      ],
-      "parameters": {
-        "jsCode": "// Group jobs into batches of 10, so each AI call scores 10 jobs at once.\nconst SIZE = 10;\nconst jobs = $input.all().map(i => i.json);\nconst out = [];\n\nfor (let i = 0; i < jobs.length; i += SIZE) {\n  const batch = jobs.slice(i, i + SIZE);\n  const jobsText = batch.map(j => [\n    `[id: ${j.id}]`,\n    `Title: ${j.title}`,\n    `Company: ${j.company || 'Not stated'}`,\n    `Location: ${j.location || 'Not stated'}`,\n    `Salary: ${j.salary || 'Not stated'}`,\n    `Description: ${j.description || 'Not provided'}`,\n  ].join('\\n')).join('\\n\\n');\n\n  out.push({\n    json: {\n      ids: batch.map(j => j.id),\n      retries: Object.fromEntries(batch.map(j => [j.id, j.retry_count || 0])),\n      count: batch.length,\n      jobsText,\n    },\n    pairedItem: batch.map((_, k) => ({ item: i + k })),\n  });\n}\nreturn out;\n"
-      },
-      "id": "879692ca-4d4e-4175-b15f-275548611791"
-    },
-    {
-      "name": "AI fit scoring (retry)",
-      "type": "@n8n/n8n-nodes-langchain.chainLlm",
-      "typeVersion": 1.5,
-      "position": [
-        2192,
-        912
-      ],
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 5000,
-      "onError": "continueRegularOutput",
-      "parameters": {
-        "promptType": "define",
-        "text": "=You are screening job ads for one candidate. Score how well EACH job below fits them.\n\nCANDIDATE\n- Final-year Bachelor of Computing Systems student (graduating Dec 2026), based in Auckland, New Zealand\n- Currently working as a full-stack software engineering intern\n- Skills: JavaScript, React, HTML/CSS, C#/.NET, Python, Java, SQL (PostgreSQL, MySQL), Azure (incl. Entra ID), Docker, Git, n8n\n- Looking for: graduate programmes, junior roles, and internships\n- Prefers web / full-stack / software development over data analytics\n- Location: Auckland preferred, open to relocating within NZ; prefers on-site roles\n- Sector interests: tech startups, education, finance, consulting\n\nSCORING GUIDE\n- 85-100: Entry-level software/web role, strong skill overlap, suitable location\n- 65-84: Good fit with minor gaps (some unfamiliar tech, less preferred location or sector)\n- 40-64: Partial fit (adjacent field such as data analytics, or notable skill gaps)\n- 0-39: Poor fit (not a software role, or clearly too senior)\n\nHARD RULES\n- Senior, lead, principal, or manager roles, or roles requiring 3+ years of experience: score no higher than 25\n- Non-technical roles: score no higher than 15\n- Roles outside New Zealand: score no higher than 20\n- If details are missing, judge from what is given and do not invent requirements\n- Score each job on its own merits; do not compare jobs against each other\n\nRED FLAGS\nFor each job, list short phrases for anything the candidate should check before applying, for example:\n\"5+ years required\", \"citizenship required\", \"security clearance\", \"outside Auckland\", \"unpaid\".\nUse an empty list if there are none.\n\nOUTPUT\nReturn exactly one result for every job below ({{ $json.count }} jobs), using the job's id exactly as given.\nGive fit_reason as one sentence (max 30 words) explaining the main reason for the score.\n\nJOBS\n{{ $json.jobsText }}",
-        "hasOutputParser": true
-      },
-      "id": "2ceac58a-f974-4df4-858a-8bb2191774fb"
-    },
-    {
-      "name": "OpenRouter (retry)",
-      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
-      "typeVersion": 1,
-      "position": [
-        2144,
-        1136
-      ],
-      "parameters": {
-        "model": "openrouter/free",
-        "options": {
-          "temperature": 0.2
-        }
-      },
-      "id": "7bd13345-f285-454d-86c3-a8470fa46a1d"
-    },
-    {
-      "name": "Score format (retry)",
-      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
-      "typeVersion": 1.2,
-      "position": [
-        2320,
-        1136
-      ],
-      "parameters": {
-        "schemaType": "manual",
-        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"results\": {\n      \"type\": \"array\",\n      \"description\": \"One entry per job, in any order\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"id\": {\n            \"type\": \"integer\",\n            \"description\": \"The job id exactly as given\"\n          },\n          \"fit_score\": {\n            \"type\": \"integer\",\n            \"minimum\": 0,\n            \"maximum\": 100\n          },\n          \"fit_reason\": {\n            \"type\": \"string\",\n            \"description\": \"One sentence explaining the score\"\n          },\n          \"red_flags\": {\n            \"type\": \"array\",\n            \"items\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"required\": [\n          \"id\",\n          \"fit_score\",\n          \"fit_reason\",\n          \"red_flags\"\n        ]\n      }\n    }\n  },\n  \"required\": [\n    \"results\"\n  ]\n}"
-      },
-      "id": "94df0591-d869-4700-9492-57734bb4f4a2"
-    },
-    {
-      "name": "Split retry scores",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        2480,
-        912
-      ],
-      "parameters": {
-        "jsCode": "// Turn the AI answers back into one item per job.\n// Matches answers to jobs by id, so it doesn't need n8n item linking\n// (the Basic LLM Chain doesn't keep it). Every job that was sent in a batch\n// comes out once: 'scored' if the AI answered it, otherwise 'error' with\n// retry_count + 1 (so failed batches and skipped jobs are retried later).\n// Retry-pass copy of \"Split batch scores\": reads the \"Batch retry jobs\" node instead.\nconst batches = $('Batch retry jobs').all().map(i => i.json);\n\n// Collect every answer from every AI call (failed calls have no output.results).\nconst answers = new Map();\nfor (const item of $input.all()) {\n  const results = (item.json.output && item.json.output.results) || [];\n  for (const r of results) {\n    const id = Number(r.id);\n    if (!answers.has(id)) answers.set(id, r);\n  }\n}\n\nconst out = [];\nfor (const batch of batches) {\n  for (const id of batch.ids) {\n    const tries = (batch.retries && batch.retries[id]) || 0;\n    const r = answers.get(id);\n    if (r && Number.isFinite(Number(r.fit_score))) {\n      out.push({ json: {\n        id,\n        fit_score: Math.max(0, Math.min(100, Math.round(Number(r.fit_score)))),\n        fit_reason: r.fit_reason || '',\n        red_flags: Array.isArray(r.red_flags) ? r.red_flags : [],\n        status: 'scored',\n        retry_count: tries,\n      }});\n    } else {\n      out.push({ json: {\n        id, fit_score: null, fit_reason: null, red_flags: [],\n        status: 'error',\n        retry_count: tries + 1,\n      }});\n    }\n  }\n}\nreturn out;\n"
-      },
-      "id": "9dd9aae8-cbc3-4ff5-b60e-7abff98f29d8"
-    },
-    {
-      "name": "Save score (retry)",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
-      "position": [
-        2704,
-        912
-      ],
-      "parameters": {
-        "operation": "update",
-        "schema": {
-          "__rl": true,
-          "mode": "list",
-          "value": "public",
-          "cachedResultName": "public"
-        },
-        "table": {
-          "__rl": true,
-          "mode": "list",
-          "value": "jobs",
-          "cachedResultName": "jobs"
-        },
-        "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "id": "={{ $json.id }}",
-            "fit_score": "={{ $json.fit_score }}",
-            "fit_reason": "={{ $json.fit_reason }}",
-            "red_flags": "={{ JSON.stringify($json.red_flags || []) }}",
-            "model_used": "openrouter/free",
-            "scored_at": "={{ $now.toISO() }}",
-            "status": "={{ $json.status }}",
-            "retry_count": "={{ $json.retry_count }}"
-          },
-          "matchingColumns": [
-            "id"
-          ],
-          "schema": [
-            {
-              "id": "id",
-              "displayName": "id",
-              "required": false,
-              "defaultMatch": true,
-              "display": true,
-              "type": "number",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "fit_score",
-              "displayName": "fit_score",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "number",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "fit_reason",
-              "displayName": "fit_reason",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "red_flags",
-              "displayName": "red_flags",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "model_used",
-              "displayName": "model_used",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "scored_at",
-              "displayName": "scored_at",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "dateTime",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "status",
-              "displayName": "status",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "retry_count",
-              "displayName": "retry_count",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "number",
-              "canBeUsedToMatch": true
-            }
-          ]
-        },
-        "options": {}
-      },
-      "id": "382e1092-f325-44d0-8faa-f44e60e3e90b"
     }
   ],
   "connections": {
@@ -964,73 +782,7 @@
       "main": [
         [
           {
-            "node": "Batch retry jobs",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Batch retry jobs": {
-      "main": [
-        [
-          {
-            "node": "AI fit scoring (retry)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "AI fit scoring (retry)": {
-      "main": [
-        [
-          {
-            "node": "Split retry scores",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "OpenRouter (retry)": {
-      "ai_languageModel": [
-        [
-          {
-            "node": "AI fit scoring (retry)",
-            "type": "ai_languageModel",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Score format (retry)": {
-      "ai_outputParser": [
-        [
-          {
-            "node": "AI fit scoring (retry)",
-            "type": "ai_outputParser",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Split retry scores": {
-      "main": [
-        [
-          {
-            "node": "Save score (retry)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Save score (retry)": {
-      "main": [
-        [
-          {
-            "node": "Get jobs to notify",
+            "node": "Batch jobs (10 per call)",
             "type": "main",
             "index": 0
           }
