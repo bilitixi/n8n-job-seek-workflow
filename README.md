@@ -68,7 +68,7 @@ Each job moves through a `status` column: `new` → `filtered_out` / `scored` / 
 | Email | Gmail API (OAuth 2.0) |
 | Code | JavaScript (n8n Code nodes), SQL |
 | Hosting | Render (free web service), custom domain via Cloudflare DNS |
-| Scheduling | cron-job.org calling a header-authenticated webhook |
+| Scheduling | cron-job.org calling a header-authenticated webhook; a **Run manually** trigger for test runs from the editor |
 | Testing | Node.js built-in test runner |
 
 ## Repository layout
