@@ -37,8 +37,8 @@ flowchart LR
     T --> B0
 ```
 
-1. **Collect.** The Gmail node fetches unread SEEK recommendation emails. A Code node parses each email's plain-text body into structured jobs (title, company, location, salary, highlights), and they are inserted into Postgres, skipping duplicates.
-2. **Process.** Failed jobs from the last 7 days that used up their retries get a fresh set of attempts. A SQL filter then drops clearly senior roles before any AI call. Remaining jobs are sent to an LLM **10 at a time**, and the reply must match a JSON schema (`fit_score`, `fit_reason`, `red_flags`). Scores are saved. Any job the AI couldn't score (a rate limit or an invalid reply) loops back through the scoring step after a 60-second pause, until it is scored or reaches the retry cap. Every job scoring **60+** then goes into one HTML digest email, sorted by score.
+1. **Collect.** The Gmail node fetches unread SEEK recommendation emails from the last 7 days (`label:Seek is:unread subject:"new jobs" newer_than:7d`). A Code node parses each email's plain-text body into structured jobs (title, company, location, salary, highlights), and they are inserted into Postgres, skipping duplicates, and the alert emails are marked as read so they are not parsed twice.
+2. **Process.** Failed jobs from the last 7 days that used up their retries get a fresh set of attempts. A SQL filter then drops clearly senior roles (senior / lead / principal / manager / head of / architect / staff in the title, or 5+ years asked for in the highlights) before any AI call. Remaining jobs are sent to an LLM **10 at a time**, and the reply must match a JSON schema (`fit_score`, `fit_reason`, `red_flags`). Scores are saved. Any job the AI couldn't score (a rate limit or an invalid reply) loops back through the scoring step after a 60-second pause, until it is scored or reaches the retry cap. Every job scoring **60+** then goes into one HTML digest email, sorted by score, and those jobs are marked `notified` only after the email is sent.
 
 Each job moves through a `status` column: `new` → `filtered_out` / `scored` / `error` → `notified`, so every job is scored once and emailed once.
 
@@ -53,6 +53,7 @@ Each job moves through a `status` column: `new` → `filtered_out` / `scored` / 
 | **Batch 10 jobs per LLM call** | Keeps a typical day to 1–3 requests, well within free-tier limits. |
 | **Structured output** validated against a JSON schema | Invalid replies are caught instead of being written to the database. |
 | **Match AI answers to jobs by id**, not by n8n item linking | n8n's LLM chain node doesn't preserve item links, so answers are matched by the job id included in each batch. |
+| **Two layers of retry on the AI call** | The LLM node itself retries a failed request up to 3 times, 5 seconds apart, and is set to continue on error, so one bad batch never stops the run: its jobs are simply saved as `error` and picked up by the retry loop below. |
 | **Retries with a cap** (`retry_count < 3`) | Temporary provider errors (rate limits, 502s) are retried on later runs; a job that keeps failing stops using quota after 3 attempts. Each run resets the count for failed jobs from the last 7 days, so a recent job gets 3 new attempts per run while older ones stay retired. |
 | **Retry loop** after saving scores | Jobs that failed loop back into the same batch → AI → split → save chain after a 60-second wait, so a brief rate limit doesn't keep them out of today's digest. The loop is bounded twice: by `retry_count < 3` in the query and by a 3-pass limit on the IF node. It relies on `$('Batch jobs (10 per call)')` returning that node's latest run, which was checked with a test execution. |
 | **Cheap filter before the LLM** | A regex in SQL removes obviously senior roles at no API cost. |
@@ -74,7 +75,7 @@ Each job moves through a `status` column: `new` → `filtered_out` / `scored` / 
 ## Repository layout
 
 ```
-├── workflow/seek-job-alert-pipeline.json   # n8n export (credentials removed): the source of truth
+├── workflow/seek-job-alert-pipeline.json   # n8n export (credentials, webhook path and email removed): the source of truth
 ├── code/                                   # generated from the workflow for easy reading
 │   ├── nodes/       # JavaScript from each Code node
 │   ├── sql/         # queries from each Postgres node
@@ -95,9 +96,9 @@ The files in `code/` are generated: `npm run extract` reads the workflow export 
 
 1. **Database:** run `database/schema.sql` in a Supabase (or any PostgreSQL) database.
 2. **n8n:** import `workflow/seek-job-alert-pipeline.json` and set up the four credentials (Postgres, Gmail OAuth2, OpenRouter, Header Auth). [docs/credentials.md](docs/credentials.md) walks through each one step by step.
-3. **Personalise:** set your email in **Send digest**, your Gmail label in **Get SEEK alert emails**, and your own profile in the **AI fit scoring** prompt.
-4. **Test:** run `database/seed-test-jobs.sql`, then execute the workflow and check the `jobs` table.
-5. **Deploy and schedule:** see [docs/deployment.md](docs/deployment.md).
+3. **Personalise:** set your email in **Send digest**, your Gmail label in **Get SEEK alert emails**, your own profile in the **AI fit scoring** prompt, and replace the `seek-run-CHANGE-ME` path in **Daily run (webhook)** with something hard to guess.
+4. **Test:** run `database/seed-test-jobs.sql`, then start the workflow from the **Run manually** trigger and check the `jobs` table.
+5. **Deploy and schedule:** see [docs/deployment.md](docs/deployment.md). Dates in the digest are always shown in NZ time; set `GENERIC_TIMEZONE` (see `deploy/*.env.example`) so n8n's own timestamps match.
 
 ## Tests
 
